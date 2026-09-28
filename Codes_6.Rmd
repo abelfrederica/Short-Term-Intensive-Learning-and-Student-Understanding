@@ -1,0 +1,591 @@
+---
+title: "Pengaruh Sistem Pembelajaran Intensif Jangka Pendek Terhadap Kedalaman Pemahaman Materi"
+subtitle: "Mahasiswa BINUS Kemanggisan B28 — Jurusan Data Science"
+author: "Kelompok 6 - Annabelle Frederica Suryana, Chelsy Wandellice, Stephanie Renata Panghudi"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                       fig.align = "center", fig.width = 9, fig.height = 5)
+```
+
+```{r libraries}
+library(readr); library(dplyr); library(tidyr); library(psych)
+library(ggplot2); library(corrplot); library(car); library(lmtest)
+library(knitr); library(scales); library(gridExtra)
+```
+
+# Desain Sampling
+
+## Tingkat Keterisian Sampel
+```{r coverage_rate}
+n_populasi  <- 127
+n_target    <- 55
+n_responden <- 57   # sebelum dedup
+n_valid     <- 56   # sesudah dedup
+
+coverage_rate <- round(n_valid / n_populasi * 100, 1)
+
+kable(data.frame(
+  Keterangan = c("Populasi", "Target Sampel Minimum", "Responden Masuk",
+                 "Duplikat Dihapus", "Responden Valid"),
+  Nilai = c(n_populasi, n_target, n_responden, n_responden - n_valid, n_valid)
+), caption = "Ringkasan Pengumpulan Data")
+
+cat("Coverage rate:", coverage_rate, "% dari populasi\n")
+cat("Target n tercapai:", ifelse(n_valid >= n_target, "Ya", "Belum"), "\n")
+```
+
+---
+
+# Praproses Data
+
+## Impor & Verifikasi Kolom
+```{r import_data}
+data_raw <- read_csv("DataBefore_6.csv", show_col_types = FALSE)
+cat("Dimensi awal:", nrow(data_raw), "baris x", ncol(data_raw), "kolom\n")
+```
+
+```{r cek_kolom}
+kable(data.frame(Index = seq_along(names(data_raw)), Kolom = names(data_raw)),
+      caption = "Cek index kolom sebelum subsetting")
+```
+
+```{r cek_grup_kolom}
+cat("Kolom 5-14 (harus item IK):\n"); print(names(data_raw)[5:14])
+cat("\nKolom 15-23 (harus item PM):\n"); print(names(data_raw)[15:23])
+cat("\nKolom 24-31 (harus item PB):\n"); print(names(data_raw)[24:31])
+cat("\nKolom 32-39 (harus item KL):\n"); print(names(data_raw)[32:39])
+```
+
+Kalau salah satu output di atas tidak cocok dengan nama item yang diharapkan, ganti angka index-nya — jangan lanjut dulu.
+
+## Hapus Duplikat & Skor Komposit
+```{r dedup_skor}
+data <- data_raw %>% distinct(Nama, .keep_all = TRUE)
+cat("Setelah hapus duplikat:", nrow(data), "dari", nrow(data_raw), "responden\n")
+
+data <- data %>%
+  mutate(IK = rowMeans(across(5:14),  na.rm = TRUE),
+         PM = rowMeans(across(15:23), na.rm = TRUE),
+         PB = rowMeans(across(24:31), na.rm = TRUE),
+         KL = rowMeans(across(32:39), na.rm = TRUE))
+```
+Skor komposit = rata-rata semua item dalam satu konstruk. Misalnya IK = rata-rata 10 item soal "kebut semalam".
+
+## Missing Values
+```{r missing_values}
+mv <- data.frame(Variabel = names(data), Missing = colSums(is.na(data)),
+                  Persen = round(colSums(is.na(data)) / nrow(data) * 100, 2))
+kable(mv %>% filter(Variabel %in% c("IK","PM","PB","KL","Kelas Besar",
+      "Rata-rata jam tidur saat minggu ujian")), caption = "Missing — Variabel Utama")
+```
+
+## Coding Ordinal Jam Tidur
+```{r coding_tidur}
+data <- data %>%
+  mutate(Tidur_Kode = case_when(
+    `Rata-rata jam tidur saat minggu ujian` == "7 - 8 jam"   ~ 5,
+    `Rata-rata jam tidur saat minggu ujian` == "5 - 6 jam"   ~ 4,
+    `Rata-rata jam tidur saat minggu ujian` == "3 - 4 jam"   ~ 3,
+    `Rata-rata jam tidur saat minggu ujian` == "1 - 2 jam"   ~ 2,
+    `Rata-rata jam tidur saat minggu ujian` == "Tidak tidur" ~ 1,
+    TRUE ~ NA_real_))
+
+kable(as.data.frame(table(data$`Rata-rata jam tidur saat minggu ujian`, data$Tidur_Kode)),
+      col.names = c("Kategori","Kode","Frekuensi"))
+```
+
+`Tidur_Kode` itu ordinal (1-5 = urutan kategori, bukan jarak yang sama). Karena itu, korelasi yang melibatkan variabel ini nanti dihitung dengan Spearman, bukan Pearson.
+
+## Export Data Bersih
+```{r export_csv}
+data_export <- data %>%
+  select(Nama, `Kelas Besar`, `Rata-rata jam tidur saat minggu ujian`,
+         Tidur_Kode, IK, PM, PB, KL, everything(), -any_of("Timestamp"))
+write_csv(data_export, "DataAfter_6.csv")
+cat("Disimpan:", nrow(data_export), "baris x", ncol(data_export), "kolom\n")
+```
+
+`-any_of("Timestamp")` dipakai supaya kalau kolom `Timestamp` tidak ada (nama beda/tidak ada), kode tetap jalan tanpa error.
+
+---
+
+# Statistik Deskriptif
+
+```{r summary_stats_new}
+construct_summary <- data.frame(
+  Variabel = c("IK","PM","PB","KL"),
+  Mean = round(c(mean(data$IK), mean(data$PM), mean(data$PB), mean(data$KL)),3),
+  SD = round(c(sd(data$IK), sd(data$PM), sd(data$PB), sd(data$KL)),3),
+  Min = round(c(min(data$IK), min(data$PM), min(data$PB), min(data$KL)),3),
+  Max = round(c(max(data$IK), max(data$PM), max(data$PB), max(data$KL)),3)
+)
+kable(construct_summary, caption = "Statistik Deskriptif Variabel Penelitian")
+
+sleep_table <- data %>%
+  count(`Rata-rata jam tidur saat minggu ujian`) %>%
+  arrange(desc(n))
+kable(sleep_table, col.names = c("Jam Tidur", "Frekuensi"), caption = "Distribusi Jam Tidur Responden")
+```
+
+Mean di sekitar 3 = netral. Di atas 3 berarti cenderung setuju dengan konstruk tersebut, di bawah 3 cenderung tidak setuju.
+
+## Visualisasi: Demografi Responden
+```{r viz_demografis, fig.width=10, fig.height=4}
+p1 <- data %>% count(`Rata-rata jam tidur saat minggu ujian`) %>%
+  mutate(pct = round(n/sum(n)*100,1),
+         tidur = factor(`Rata-rata jam tidur saat minggu ujian`,
+                        levels = c("7 - 8 jam","5 - 6 jam","3 - 4 jam","1 - 2 jam","Tidak tidur"))) %>%
+  ggplot(aes(tidur, n, fill = tidur)) +
+  geom_col(width = 0.6) + geom_text(aes(label = paste0(n,"\n(",pct,"%)")), vjust = -0.3, size = 3.2) +
+  scale_y_continuous(limits = c(0,30), expand = c(0,0)) +
+  labs(title = "Jam Tidur saat Minggu Ujian", x = NULL, y = "Jumlah") +
+  theme_minimal() + theme(legend.position = "none", axis.text.x = element_text(angle = 10, hjust = 0.8))
+
+p2 <- data %>% count(`Kelas Besar`) %>% mutate(pct = round(n/sum(n)*100,1)) %>%
+  ggplot(aes(`Kelas Besar`, n, fill = `Kelas Besar`)) +
+  geom_col(width = 0.45) + geom_text(aes(label = paste0(n,"\n(",pct,"%)")), vjust = -0.3, size = 4) +
+  scale_y_continuous(limits = c(0,45), expand = c(0,0)) +
+  labs(title = "Distribusi Kelas Besar", x = NULL, y = "Jumlah") + theme_minimal() + theme(legend.position = "none")
+
+gridExtra::grid.arrange(p1, p2, ncol = 2)
+```
+
+## Visualisasi: Rata-rata per Konstruk
+```{r viz_mean_bar, fig.height=4}
+mean_df <- data.frame(Konstruk = c("IK","PM","PB","KL"),
+                       Mean = c(mean(data$IK), mean(data$PM), mean(data$PB), mean(data$KL)),
+                       SD = c(sd(data$IK), sd(data$PM), sd(data$PB), sd(data$KL)))
+
+ggplot(mean_df, aes(reorder(Konstruk, Mean), Mean, fill = Konstruk)) +
+  geom_col(width = 0.55) +
+  geom_errorbar(aes(ymin = pmax(Mean-SD,1), ymax = pmin(Mean+SD,5)), width = 0.25) +
+  geom_text(aes(label = round(Mean,2)), hjust = -0.4) +
+  geom_hline(yintercept = 3, linetype = "dashed", color = "gray") +
+  coord_flip() + scale_y_continuous(limits = c(0,5.6)) +
+  labs(title = "Rata-rata Skor Komposit (± 1 SD)", x = NULL, y = "Mean (1-5)") +
+  theme_minimal() + theme(legend.position = "none")
+```
+
+Garis putus-putus di angka 3 = titik netral. Bar yang melewati garis itu berarti rata-rata respondennya condong setuju.
+
+## Visualisasi: Distribusi per Konstruk
+
+```{r viz_distribusi, fig.height=5.5}
+data %>% select(IK, PM, PB, KL) %>% pivot_longer(everything(), names_to = "K", values_to = "Skor") %>%
+  ggplot(aes(Skor, fill = K)) +
+  geom_histogram(binwidth = 0.25, color = "white") +
+  geom_vline(xintercept = 3, linetype = "dashed", color = "gray") +
+  facet_wrap(~K, scales = "free_y", ncol = 2) +
+  scale_x_continuous(breaks = 1:5, limits = c(1,5.1)) +
+  labs(title = "Distribusi Skor per Konstruk", x = "Skor", y = "Frekuensi") +
+  theme_minimal() + theme(legend.position = "none")
+```
+
+## Statistik Deskriptif per Item
+```{r item_stats}
+ik_desc <- data.frame(Item = names(data)[5:14], Mean = round(colMeans(data[,5:14], na.rm = TRUE),3), SD = round(apply(data[,5:14],2,sd,na.rm=TRUE),3))
+pm_desc <- data.frame(Item = names(data)[15:23], Mean = round(colMeans(data[,15:23], na.rm = TRUE),3), SD = round(apply(data[,15:23],2,sd,na.rm=TRUE),3))
+pb_desc <- data.frame(Item = names(data)[24:31], Mean = round(colMeans(data[,24:31], na.rm = TRUE),3), SD = round(apply(data[,24:31],2,sd,na.rm=TRUE),3))
+kl_desc <- data.frame(Item = names(data)[32:39], Mean = round(colMeans(data[,32:39], na.rm = TRUE),3), SD = round(apply(data[,32:39],2,sd,na.rm=TRUE),3))
+
+kable(list(ik_desc, pm_desc, pb_desc, kl_desc), caption = "Descriptive Statistics of Items (IK, PM, PB, KL)")
+```
+
+## Visualisasi: Rata-rata per Item
+
+```{r helper_item_plot}
+plot_items <- function(cols, labels, judul, warna_rendah, warna_tinggi) {
+  df <- data.frame(Label = labels, Mean = colMeans(data[, cols], na.rm = TRUE))
+  ggplot(df, aes(reorder(Label, Mean), Mean, fill = Mean)) +
+    geom_col(width = 0.65) + geom_text(aes(label = round(Mean,2)), hjust = -0.15, size = 3.5) +
+    geom_hline(yintercept = 3, linetype = "dashed", color = "gray") +
+    coord_flip() + scale_fill_gradient(low = warna_rendah, high = warna_tinggi) +
+    scale_y_continuous(limits = c(0,5.6)) +
+    labs(title = judul, x = NULL, y = "Mean (1-5)") + theme_minimal() + theme(legend.position = "none")
+}
+```
+
+### Item IK
+```{r viz_ik, fig.height=5}
+plot_items(5:14,
+  c("Mulai belajar malam sebelum ujian","Menunda belajar mendekati ujian",
+    "Belajar banyak materi sekaligus","Fokus di bawah tekanan waktu",
+    "Pilih kisi-kisi yang diperkirakan keluar","Kurangi waktu tidur untuk ujian",
+    "Andalkan belajar intensif jangka pendek","Mendadak lebih efektif dari mencicil",
+    "Kesulitan atur jadwal belajar","Panik menjelang ujian"),
+  "Rata-rata per Item — IK", "pink", "red")
+```
+
+### Item PM
+```{r viz_pm, fig.height=5}
+plot_items(15:23,
+  c("Memahami konsep di balik materi","Menjelaskan dengan bahasa sendiri",
+    "Terapkan pada soal berbeda","Ingat materi beberapa minggu setelah ujian",
+    "Hubungkan dengan topik lain","Jelaskan ke orang lain tanpa catatan",
+    "Tarik kesimpulan dari materi","Gunakan materi dalam situasi baru",
+    "Pemahaman bertahan jangka panjang"),
+  "Rata-rata per Item — PM", "lightblue", "darkblue")
+```
+
+### Item PB
+```{r viz_pb, fig.height=5}
+plot_items(24:31,
+  c("Jadwal belajar teratur semester","Mengulang materi setelah kuliah",
+    "Membuat catatan/rangkuman sendiri","Bagi waktu belajar konsisten",
+    "Cari sumber belajar tambahan","Mencicil belajar jauh sebelum ujian",
+    "Evaluasi materi yang belum dipahami","Belajar walau tidak ada ujian dekat"),
+  "Rata-rata per Item — PB", "lightgreen", "darkgreen")
+```
+
+### Item KL
+```{r viz_kl, fig.height=5}
+plot_items(32:39,
+  c("Sulit konsentrasi setelah begadang","Lambat memahami soal ujian",
+    "Mudah lupa materi saat ujian","Kondisi fisik menurun",
+    "Kantuk berlebihan saat ujian","Kemampuan berpikir menurun",
+    "Lebih mudah cemas saat ujian","Butuh waktu lebih lama mengingat"),
+  "Rata-rata per Item — KL", "khaki", "brown")
+```
+
+## IK vs Jam Tidur
+```{r viz_tidur_ik, fig.height=4}
+data %>% mutate(Tidur_Label = factor(`Rata-rata jam tidur saat minggu ujian`,
+    levels = c("Tidak tidur","1 - 2 jam","3 - 4 jam","5 - 6 jam","7 - 8 jam"))) %>%
+  ggplot(aes(Tidur_Label, IK, fill = Tidur_Label)) +
+  geom_boxplot(outlier.size = 2) +
+  labs(title = "IK vs Jam Tidur", subtitle = "Apakah tidur lebih sedikit = IK lebih tinggi?",
+       x = "Jam Tidur", y = "Skor IK") + theme_minimal() + theme(legend.position = "none")
+```
+
+```{r kruskal_tidur}
+kruskal_result <- kruskal.test(IK ~ `Rata-rata jam tidur saat minggu ujian`, data = data)
+
+kable(
+  data.frame(
+    Statistic = round(kruskal_result$statistic,4),
+    P_Value = round(kruskal_result$p.value,4)
+  ),
+  caption = "Kruskal-Wallis Test: IK by Sleep Duration"
+)
+```
+
+
+# Uji Reliabilitas (Cronbach's Alpha)
+Alpha mengukur konsistensi internal item dalam satu konstruk. Patokan umum: alpha ≥ 0.70 = reliabel.
+```{r reliabilitas_dan_validitas}
+a_ik <- psych::alpha(data[,5:14]);  a_pm <- psych::alpha(data[,15:23])
+a_pb <- psych::alpha(data[,24:31]); a_kl <- psych::alpha(data[,32:39])
+
+alpha_vals <- c(a_ik$total$raw_alpha, a_pm$total$raw_alpha, a_pb$total$raw_alpha, a_kl$total$raw_alpha)
+
+check_citc <- function(alpha_obj, nama) {
+  citc <- round(alpha_obj$item.stats$r.drop, 3)
+  data.frame(Konstruk = nama, Item = rownames(alpha_obj$item.stats), CITC = citc,
+             Status = ifelse(citc < 0.30, "Lemah", "OK"))
+}
+citc_all <- rbind(check_citc(a_ik,"IK"), check_citc(a_pm,"PM"),
+                   check_citc(a_pb,"PB"), check_citc(a_kl,"KL"))
+
+validity_summary <- citc_all %>%
+  group_by(Konstruk) %>%
+  summarise(
+    Total_Item = n(),
+    Item_Valid = sum(CITC >= 0.30),
+    Item_Tidak_Valid = sum(CITC < 0.30)
+  )
+
+kable(validity_summary, caption = "Summary of Validity Test")
+
+kable(data.frame(Konstruk = c("IK","PM","PB","KL"), Alpha = round(alpha_vals,3),
+                  Status = ifelse(alpha_vals >= 0.70, "Reliabel", "Perlu Ditinjau")),
+      caption = "Cronbach's Alpha per Konstruk")
+```
+
+## Cek Item Lemah (CITC) per Konstruk
+Melihat langsung item-total correlation (CITC) tiap konstruk, dengan item yang memilikin CITC < 0.30 dianggap lemah.
+
+```{r citc_check}
+kable(citc_all, caption = "Item-Total Correlation — Semua Konstruk")
+```
+
+```{r citc_text}
+lemah_pb <- citc_all %>% filter(Konstruk == "PB", Status == "Lemah") %>% pull(Item)
+```
+
+Item PB dengan CITC di bawah 0.30: **`r if(length(lemah_pb)==0) "tidak ada" else paste(lemah_pb, collapse=", ")`**. Item ini (kalau ada) jadi kandidat untuk direvisi atau dikeluarkan dari konstruk PB pada survei berikutnya.
+
+---
+
+# Analisis Korelasi
+Skor komposit (IK, PM, PB, KL) adalah rata-rata item Likert, tapi lazim diperlakukan sebagai kuasi-kontinu sehingga Pearson umum dipakai. `Tidur_Kode` murni ordinal kategori (bukan rata-rata banyak item), jadi untuk variabel ini Spearman lebih tepat. 
+```{r cor_matrix}
+vars_cor <- c("IK","PM","PB","KL","Tidur_Kode")
+cor_p <- cor(data[, vars_cor], method = "pearson",  use = "complete.obs")
+cor_s <- cor(data[, vars_cor], method = "spearman", use = "complete.obs")
+
+kable(round(cor_p, 3), caption = "Korelasi Pearson")
+kable(round(cor_s, 3), caption = "Korelasi Spearman (pembanding, karena dasar data ordinal)")
+```
+
+```{r corrplot, fig.width=6, fig.height=6}
+corrplot(cor_p, method = "color", type = "upper", addCoef.col = "black",
+         tl.col = "black", tl.srt = 45, col = colorRampPalette(c("red","white","blue"))(200),
+         title = "Matriks Korelasi (Pearson)", mar = c(0,0,1.5,0))
+```
+
+```{r cor_tests}
+cor_pairs <- list(
+  list(x="IK", y="PM", m="pearson"), list(x="IK", y="PB", m="pearson"),
+  list(x="IK", y="KL", m="pearson"), list(x="KL", y="PM", m="pearson"),
+  list(x="PB", y="PM", m="pearson"), list(x="Tidur_Kode", y="IK", m="spearman")
+)
+
+cor_summary <- do.call(rbind, lapply(cor_pairs, function(p) {
+  t <- cor.test(data[[p$x]], data[[p$y]], method = p$m)
+  data.frame(Pasangan = paste(p$x,"vs",p$y), Metode = p$m,
+             r = round(unname(t$estimate), 3), p_value = round(t$p.value, 4),
+             Signifikan = ifelse(t$p.value < 0.05, "Ya *", "Tidak"))
+}))
+kable(cor_summary, caption = "Ringkasan Uji Korelasi")
+```
+
+r mendekati 0 = nyaris tidak ada hubungan linear; tanda + / - menunjukkan arah; p < 0.05 berarti hubungan itu tidak terjadi karena kebetulan.
+
+---
+
+# Uji Normalitas
+Shapiro-Wilk paling akurat untuk n < 50. Sampel ini n = 56, jadi sedikit di luar rentang ideal — hasilnya tetap informatif, tapi sebaiknya dicek juga lewat Q-Q plot di bagian diagnostic plot regresi nanti, bukan cuma p-value-nya.
+
+```{r normalitas}
+sw <- lapply(data[, c("IK","PM","PB","KL")], shapiro.test)
+norm_df <- data.frame(Variabel = c("IK","PM","PB","KL"),
+                       W = round(sapply(sw, function(x) x$statistic), 4),
+                       p_value = round(sapply(sw, function(x) x$p.value), 4))
+norm_df$Normal <- ifelse(norm_df$p_value > 0.05, "Ya", "Tidak")
+kable(norm_df, caption = "Shapiro-Wilk")
+```
+
+---
+
+# Regresi Linear
+
+## Model 1: PM ~ IK
+```{r model1}
+model1 <- lm(PM ~ IK, data = data)
+
+coef1 <- summary(model1)$coefficients
+simple_reg <- data.frame(
+  Variable = rownames(coef1),
+  Estimate = round(coef1[,1],4),
+  Std_Error = round(coef1[,2],4),
+  t_Value = round(coef1[,3],4),
+  P_Value = round(coef1[,4],4)
+)
+kable(simple_reg, caption = "Simple Linear Regression Result")
+```
+
+### Simple Linear Regression
+
+Untuk menguji pengaruh langsung Intensitas Kebut Semalam terhadap Pemahaman Materi, dilakukan regresi linear sederhana.
+
+**Model:**
+$$PM = \beta_0 + \beta_1 IK + \varepsilon$$
+
+```{r simple_reg_table, echo=FALSE}
+simple_reg_img <- data.frame(
+  Variabel = c("Intercept", "IK"),
+  Koefisien = round(coef1[, 1], 4),
+  `p-value` = round(coef1[, 4], 4),
+  check.names = FALSE
+)
+
+kable(simple_reg_img, row.names = FALSE, caption = "Hasil Regresi Linear Sederhana")
+```
+
+Hasil regresi menunjukkan bahwa Intensitas Kebut Semalam `r ifelse(summary(model1)$coefficients[2,4] < 0.05, "memiliki", "tidak memiliki")` pengaruh signifikan terhadap Pemahaman Materi.
+
+```{r viz_model1, fig.height=4.5}
+ggplot(data, aes(IK, PM)) +
+  geom_point(alpha = 0.55, color = "blue", size = 2.5) +
+  geom_smooth(method = "lm", se = TRUE, color = "red", fill = "pink") +
+  scale_x_continuous(breaks = 1:5, limits = c(1.5,5.2)) +
+  labs(title = "Regresi Sederhana: IK -> PM",
+       subtitle = paste0("r=", round(cor(data$IK,data$PM),3),
+                          " | R²=", round(summary(model1)$r.squared,4),
+                          " | p=", round(summary(model1)$coefficients[2,4],4)),
+       x = "IK", y = "PM") + theme_minimal()
+```
+
+Kalau garis tren hampir flat dan p > 0.05, artinya IK sendirian (tanpa kontrol variabel lain) tidak cukup untuk memprediksi PM.
+
+## Model 2: PM ~ IK + PB + KL
+```{r model2}
+model2 <- lm(PM ~ IK + PB + KL, data = data)
+
+coef2 <- summary(model2)$coefficients
+multiple_reg <- data.frame(
+  Variable = rownames(coef2),
+  Estimate = round(coef2[,1],4),
+  Std_Error = round(coef2[,2],4),
+  t_Value = round(coef2[,3],4),
+  P_Value = round(coef2[,4],4)
+)
+kable(multiple_reg, caption = "Multiple Regression Result")
+```
+
+```{r model2_coef}
+coef_table <- summary(model2)$coefficients
+
+hypothesis_table <- data.frame(
+  Variable = rownames(coef_table)[-1],
+  Estimate = round(coef_table[-1,1], 4),
+  P_Value = round(coef_table[-1,4], 4)
+)
+
+hypothesis_table$Decision <- ifelse(
+  hypothesis_table$P_Value < 0.05,
+  "Accepted",
+  "Rejected"
+)
+
+kable(hypothesis_table, caption = "Hypothesis Testing Result")
+
+model_summary <- summary(model2)
+f_stat <- model_summary$fstatistic
+p_val_f <- pf(f_stat[1], f_stat[2], f_stat[3], lower.tail = FALSE)
+
+f_test_df <- data.frame(
+  F_Statistic = round(f_stat[1], 3),
+  DF1 = f_stat[2],
+  DF2 = f_stat[3],
+  P_Value = round(p_val_f, 4)
+)
+
+kable(f_test_df, caption = "Uji Kelayakan Model (F-Test / ANOVA)")
+```
+
+## Uji Asumsi
+```{r uji_asumsi}
+vif_vals <- vif(model2)
+kable(data.frame(Variabel = names(vif_vals), VIF = round(vif_vals,3),
+                  Status = ifelse(vif_vals < 5, "OK", "Perlu Perhatian")),
+      caption = "Multikolinearitas (VIF)")
+
+bp <- bptest(model2); sw_res <- shapiro.test(residuals(model2))
+kable(data.frame(Uji = c("Breusch-Pagan","Shapiro-Wilk Residual"),
+                  Statistik = round(c(bp$statistic, sw_res$statistic), 4),
+                  p_value = round(c(bp$p.value, sw_res$p.value), 4),
+                  Kesimpulan = c(ifelse(bp$p.value>0.05,"Tidak ada heteroskedastisitas","Ada heteroskedastisitas"),
+                                 ifelse(sw_res$p.value>0.05,"Residual normal","Residual tidak normal"))))
+```
+
+```{r diagnostic_plots, fig.height=7}
+par(mfrow = c(2,2)); plot(model2); par(mfrow = c(1,1))
+```
+
+Plot kiri-atas (Residuals vs Fitted) untuk cek pola non-linear; kanan-atas (Q-Q) untuk cek normalitas residual secara visual, menjadi pelengkap Shapiro-Wilk di atas, terutama karena n kita borderline.
+
+---
+
+# Mediasi: KL sebagai Mediator (IK -> KL -> PM)
+
+Desain kuesioner menempatkan KL (kelelahan) sebagai mediator/pengganggu antara IK dan PM. Dicek pakai langkah Baron & Kenny:
+```{r mediasi}
+model_a <- lm(KL ~ IK, data = data)         # Langkah 2: IK -> KL
+model_b <- lm(PM ~ IK + KL, data = data)    # Langkah 3 & 4: KL & IK -> PM (kontrol satu sama lain)
+
+med_df <- data.frame(
+  Langkah = c("1. IK -> PM (tanpa kontrol)", "2. IK -> KL", "3. KL -> PM (kontrol IK)", "4. IK -> PM (kontrol KL)"),
+  Koefisien = round(c(coef(model1)["IK"], coef(model_a)["IK"], coef(model_b)["KL"], coef(model_b)["IK"]), 4),
+  p_value = round(c(summary(model1)$coefficients["IK","Pr(>|t|)"],
+                     summary(model_a)$coefficients["IK","Pr(>|t|)"],
+                     summary(model_b)$coefficients["KL","Pr(>|t|)"],
+                     summary(model_b)$coefficients["IK","Pr(>|t|)"]), 4))
+kable(med_df, caption = "Langkah Baron & Kenny")
+```
+
+```{r mediasi_text}
+step1_sig <- summary(model1)$coefficients["IK","Pr(>|t|)"] < 0.05
+step2_sig <- summary(model_a)$coefficients["IK","Pr(>|t|)"] < 0.05
+step3_sig <- summary(model_b)$coefficients["KL","Pr(>|t|)"] < 0.05
+```
+
+Syarat minimal mediasi Baron & Kenny: Langkah 1 harus signifikan (IK harus benar-benar memprediksi PM sebelum KL bisa dibilang "menjelaskan" hubungan). 
+Di sini Langkah 1 **`r if(step1_sig) "signifikan" else "tidak signifikan"`**, sehingga kesimpulannya:
+**`r if(!step1_sig) "tidak ada efek mediasi yang bisa diuji — karena tidak ada hubungan awal IK->PM yang perlu dijelaskan oleh KL" else if(step2_sig & step3_sig) "ada indikasi mediasi" else "mediasi tidak terbukti kuat"`**.
+
+---
+
+# Perbandingan Kelas LA09 vs LB09
+```{r class_comparison}
+class_agg <- data %>% group_by(`Kelas Besar`) %>%
+  summarise(n=n(), IK=round(mean(IK),3), PM=round(mean(PM),3), PB=round(mean(PB),3), KL=round(mean(KL),3))
+kable(class_agg, caption = "Rata-rata per Kelas")
+```
+
+```{r ttest}
+tt <- lapply(c("IK","PM","PB","KL"), function(v) t.test(data[[v]] ~ data$`Kelas Besar`))
+ttest_df <- data.frame(Variabel = c("IK","PM","PB","KL"),
+                        t = round(sapply(tt, function(x) x$statistic), 3),
+                        p_value = round(sapply(tt, function(x) x$p.value), 4))
+ttest_df$Signifikan <- ifelse(ttest_df$p_value < 0.05, "Ya *", "Tidak")
+kable(ttest_df, caption = "t-test: LA09 vs LB09")
+```
+
+```{r viz_class, fig.height=4.5}
+data %>% select(`Kelas Besar`, IK, PM, PB, KL) %>%
+  pivot_longer(-`Kelas Besar`, names_to = "Konstruk", values_to = "Skor") %>%
+  mutate(Konstruk = factor(Konstruk, levels = c("IK","PM","PB","KL"))) %>%
+  ggplot(aes(Konstruk, Skor, fill = `Kelas Besar`)) +
+  geom_boxplot(position = position_dodge(0.7), width = 0.6) +
+  geom_hline(yintercept = 3, linetype = "dashed") +
+  labs(title = "Skor per Konstruk: LA09 vs LB09") + theme_minimal()
+```
+
+---
+
+# Kesimpulan
+```{r kesimpulan_calc}
+r_ik_pm <- round(cor(data$IK,data$PM),3); p_ik_pm <- round(cor.test(data$IK,data$PM)$p.value,4)
+r_ik_pb <- round(cor(data$IK,data$PB),3); p_ik_pb <- round(cor.test(data$IK,data$PB)$p.value,4)
+r_pb_pm <- round(cor(data$PB,data$PM),3); p_pb_pm <- round(cor.test(data$PB,data$PM)$p.value,4)
+r2_m2 <- round(summary(model2)$r.squared,3)
+coef_pb_m2 <- round(coef(model2)["PB"],3); p_pb_m2 <- round(summary(model2)$coefficients["PB","Pr(>|t|)"],4)
+ttest_max_p <- round(max(ttest_df$p_value),3)
+```
+```{r}
+cat("IK vs PM: r =", r_ik_pm,
+    ", p-value =", p_ik_pm, "\n")
+
+cat("IK vs PB: r =", r_ik_pb,
+    ", p-value =", p_ik_pb, "\n")
+
+cat("PB vs PM: r =", r_pb_pm,
+    ", p-value =", p_pb_pm, "\n")
+
+cat("R-squared Model 2 =", r2_m2, "\n")
+
+cat("Koefisien PB =", coef_pb_m2,
+    ", p-value =", p_pb_m2, "\n")
+
+cat("Maximum p-value t-test =", ttest_max_p, "\n")
+```
+
+**Temuan Utama:**
+
+1. IK vs PM: r = `r r_ik_pm`, p = `r p_ik_pm` — `r if(p_ik_pm<0.05) "signifikan" else "tidak signifikan"`. Kebut semalam saja tidak terbukti langsung menurunkan/menaikkan pemahaman.
+2. IK vs PB: r = `r r_ik_pb`, p = `r p_ik_pb` — `r if(p_ik_pb<0.05) "signifikan" else "tidak signifikan"`.
+3. PB vs PM: r = `r r_pb_pm`, p = `r p_pb_pm` — `r if(p_pb_pm<0.05) "signifikan" else "tidak signifikan"`. Pola belajar yang teratur berkaitan dengan pemahaman yang lebih baik.
+4. Regresi berganda: PB koefisien = `r coef_pb_m2`, p = `r p_pb_m2`, model menjelaskan `r r2_m2*100`% variasi PM (R² = `r r2_m2`).
+5. Perbandingan LA09 vs LB09: p terbesar dari semua konstruk = `r ttest_max_p` — tidak ada perbedaan signifikan antar kelas.
